@@ -1,6 +1,8 @@
 
 import json
 import os 
+import subprocess
+import sys 
 from pathlib import Path
 from openai import OpenAI
 
@@ -178,6 +180,55 @@ def create_file(filename: str, content: str):
         "filename": str(path.relative_to(WORKSPACE)),
     }
 
+def run_python(filename: str): 
+
+    path = (WORKSPACE / filename).resolve()
+
+    if not path.is_relative_to(WORKSPACE):
+        return {"error": "Scripts must be inside the agent workspace."}
+
+    if path.suffix.lower() != ".py":
+        return{"error" : "Only Python (.py) files can be executed."}
+
+    if not path.is_file():
+        return {"error": "Python script is not found"}
+
+    approval = input(
+        f"\nApprove running {path.name}? Type RUN to execute: "
+    )
+
+    if approval != "RUN":
+        return{
+            "status":"cancelled",
+            "message": "Execution not approved"
+        }
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", str(path)],
+            cwd=str(WORKSPACE),
+            capture_output=True, 
+            text=True,
+            timeout = 15, 
+            shell = False, 
+            check = False,
+        )
+
+        return {
+            "status": "completed" if result.returncode == 0 else "failed",
+            "return_code": result.returncode,
+            "stdout": result.stdout[-12000:],
+            "stderr" : result.stderr[-12000:]
+        }
+
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "timeout",
+            "message": "The script exceeded the 15-second time limit"
+        }
+
+    except OSError as exc:
+        return{"error": str(exc)}
 
 tools = [
     {
@@ -271,6 +322,29 @@ tools = [
             },
         },
     },
+    {"type": "function",
+        "function": {
+            "name": "run_python",
+            "description": (
+                "Run a Python script inside the agent workspace. "
+                "The user must approve execution by typing RUN. "
+                "Returns the script's output and errors."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": (
+                            "Python script path relative to the workspace, "
+                            "such as 'hello.py'."
+                        )
+                    }
+                },
+                "required": ["filename"]
+            },
+        },
+    }
 ]
 
 
@@ -299,7 +373,8 @@ functions = {
     "list_files": lambda args: list_files(**args),
     "read_file": lambda args: read_file(**args),
     "create_file": lambda args: create_file(**args),
-    "search_files": lambda args: search_files(**args)
+    "search_files": lambda args: search_files(**args),
+    "run_python": lambda args: run_python(**args)
 }
 
 print("Qwen local agent ready.")
