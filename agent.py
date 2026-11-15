@@ -3,8 +3,13 @@ import json
 import os
 import subprocess
 import sys
+import base64
 from pathlib import Path
 from openai import OpenAI
+import ctypes
+from ctypes import wintypes
+from io import BytesIO
+from PIL import ImageGrab
 
 # Connect to LM Studio running locally.
 client = OpenAI(
@@ -583,6 +588,292 @@ def save_conversation_summary(summary):
         print(f"\nCould not save conversation summary: {exc}")
         return False
 
+def get_active_window():
+    """Return information about the currently active Window."""
+
+    if os.name != "nt":
+        return {"return": "Desktop observation is only supported on Windows."}
+
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        user32.GetForegroundWindow.restype = wintypes.HWND
+
+        hwnd = user32.GetForegroundWindow()
+
+        if not hwnd:
+            return {"error": "Could not identify the active window."}
+
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+        user32.GetWindowTextW.argtypes = [
+            wintypes.HWND,
+            wintypes.LPWSTR,
+            ctypes.c_int
+        ]
+        user32.GetWindowTextW.restype = ctypes.c_int
+
+        title_length = user32.GetWindowTextLengthW(hwnd)
+        title_buffer = ctypes.create_unicode_buffer(title_length + 1)
+
+        user32.GetWindowTextW(
+            hwnd, 
+            title_buffer,
+            title_length + 1
+        )
+
+        process_id = wintypes.DWORD()
+
+        get_window_thread_process_id = getattr(
+            user32, "GetWindowThreadProcessId"
+        )
+
+        get_window_thread_process_id.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD)
+        ]
+        get_window_thread_process_id.restype = wintypes.DWORD
+
+        get_window_thread_process_id(
+            hwnd,
+            ctypes.byref(process_id)
+        )
+
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD, 
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD)
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        process_name = "Unknown"
+
+        handle = kernel32.OpenProcess(
+            0x1000,
+            False, 
+            process_id.value
+        )
+
+        if handle:
+            try: 
+                executable_buffer = ctypes.create_unicode_buffer(32768)
+                buffer_size = wintypes.DWORD(len(executable_buffer))
+
+                success = kernel32.QueryFullProcessImageNameW(
+                    handle, 
+                    0, 
+                    executable_buffer,
+                    ctypes.byref(buffer_size)
+                )
+
+                if success:
+                    process_name = Path(executable_buffer.value).name
+
+            finally:
+                kernel32.CloseHandle(handle)
+
+        return {
+            "window_title": title_buffer.value or "(Untitled window)",
+            "process_name": process_name,
+            "process_id": process_id.value
+        }
+
+    except Exception as exc:
+        return {"error": str(exc)}
+
+def capture_screenshot():
+    """Capture the primary Windows display and return image data."""
+
+    if os.name != "nt":
+        return {"error": "Screenshot capture is only supported on Windows."}
+
+    try:
+        screenshot = ImageGrab.grab()
+
+        screenshot.thumbnail((1600, 1200))
+
+        image_buffer = BytesIO()
+        screenshot.save(image_buffer, format="PNG")
+
+        image_base64 = base64.b64encode(
+            image_buffer.getvalue()
+        ).decode("ascii")
+
+        return {
+            "image_base64": image_base64,
+            "mime_type": "image/png",
+            "width": screenshot.width, 
+            "height": screenshot.height
+        }
+
+    except Exception as exc:
+        return {"error": f"Screenshot capture failed: {exc}"}
+
+def get_mouse_position():
+    """Return the current mouse cursor coordinates."""
+
+    if os.name != "nt":
+        return {"error": "Mouse detection is only supported on Windows. "}
+
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        class POINT(ctypes.Structure):
+            _fields_ = [
+                ("x", wintypes.LONG),
+                ("y", wintypes.LONG)
+            ]
+
+        point = POINT()
+
+        user32.GetCursorPos.argtypes = [
+            ctypes.POINTER(POINT)
+        ]
+        user32.GetCursorPos.restype = wintypes.BOOL
+
+        success = user32.GetCursorPos(ctypes.byref(point))
+
+        if not success:
+            return{"error": "Could not retrieve mouse position."}
+
+        return{
+            "x": point.x,
+            "y": point.y,
+            "status": "success"
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+def move_mouse(args):
+    """Move the mouse cursor after user approval"""
+
+    if os.name != "nt":
+        return{"error": "Mouse movement is only supported on Windows."}
+
+    try:
+        x = int(args.get("x"))
+        y = int(args.get("y"))
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+        user32.GetSystemMetrics.restype = ctypes.c_int
+
+        screen_width = user32.GetSystemMetrics(0)
+        screen_height = user32.GetSystemMetrics(1)
+
+        if not (0 <= x < screen_width and 0 <= y < screen_height):
+            return{
+                "error": "Coordinates are outside the screen boundaries",
+                "screen_width": screen_width,
+                "screen_height": screen_height
+            }
+        print(f"\nThe agent wants to move your mouse to ({x}, {y}).")
+        approval = input("Type YES to approve: ").strip()
+
+        if approval != "YES":
+            return{"status": "cancelled", "message": "Mouse movement was not approved."}
+
+        user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        user32.SetCursorPos.restype = wintypes.BOOL
+
+        success = user32.SetCursorPos(x, y)
+
+        if not success:
+            return{"error": "Windows could not move the cursor."}
+
+        return {
+            "status": "success",
+            "x": x,
+            "y": y,
+            "message": "Mouse cursor moved successfully."
+        }
+
+    except (TypeError, ValueError):
+        return {"error": "Coordinates must valid integers."}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+def click_mouse(args):
+    """Perform an approved mouse click at the current cursor position."""
+
+    if os.name != "nt":
+        return {"error": "Mouse clicking is only supported on Windows."}
+
+    try:
+        button = args.get("button", "left").lower()
+
+        if button not in ("left", "right"):
+            return {"error": "Button must be 'left' or 'right' "}
+
+        position = get_mouse_position()
+
+        if position.get("status") != "success":
+            return {"error": "Could not determine cursor position."}
+
+        x = position["x"]
+        y = position["y"]
+
+        print(
+            f"\nThe agent wants to perform a {button} click "
+            f"at ({x}, {y})."
+        )
+
+        approval = input("Type YES to approve: ").strip()
+
+        if approval != "YES":
+            return {
+                "status": "cancelled",
+                "message": "Mouse click was not approved"
+            }
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        user32.mouse_event.argtypes = [
+            wintypes.DWORD,
+            wintypes.DWORD, 
+            wintypes.DWORD, 
+            wintypes.DWORD,
+            ctypes.c_size_t
+        ]
+
+        user32.mouse_event.restype = None 
+
+        if button == "left":
+            down = 0x0002
+            up = 0x0004
+        else:
+            down = 0x0008
+            up = 0x0010
+
+        user32.mouse_event(down, 0, 0, 0, 0)
+        user32.mouse_event(up, 0, 0, 0, 0)
+
+        return{
+            "status": "success", 
+            "button": button, 
+            "x": x, 
+            "y": y, 
+            "message": f"Performed one {button} click."
+        }
+
+    except Exception as exc:
+        return {"error": str(exc)}
+
 tools = [
     {
         "type": "function",
@@ -783,6 +1074,98 @@ tools = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_active_window",
+            "description": (
+                "Identify the currently active Windows application. "
+                "Returns its window title, executable name, and process ID. "
+                "This is a read-only desktop observation tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "capture_screenshot",
+            "description": (
+                "Capture the user's primary desktop screen and provide "
+                "the image to the AI model for visual analysis. "
+                "This is read-only and does not change the desktop."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_mouse_position",
+            "description": (
+                "Get the current mouse cursor coordinates "
+                "on the Windows desktop. This is read-only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_mouse",
+            "description": (
+                "Move the Windows mouse cursor to specified screen "
+                "coordinates. Always requires user approval."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {
+                        "type": "integer",
+                        "description": "Horizontal screen coordinate."
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "Vertical screen coordinate."
+                    }
+                },
+                "required": ["x", "y"]
+            }
+        }
+    }, 
+    {
+        "type": "function",
+        "function": {
+            "name": "click_mouse",
+            "description": (
+                "Perform one left or right mouse click at the "
+                "current cursor position. Requires user approval."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right"],
+                        "description": "Mouse button to click."
+                    }
+                },
+                "required": ["button"]
+            }
+        }
+    },  
 ]
 
 
@@ -812,7 +1195,27 @@ You can edit existing files inside your dedicated workspace using edit_file.
 Never claim a file was edited unless the tool confirms success.
 The user must explicitly approve every edit.
 
+You can capture and analyze the desktop using capture_screenshot. Only capture a screenshot when the user explicitly requests it.
+When a screenshot is provided, analyze the actual image. Describe visible applications, windows, buttons, and other relevant
+visual elements accurately. Screenshot capture is read-only. Never claim to have clicked,
+typed, or changed anything using this tool.
+
+You can determine the current mouse cursor coordinates
+using get_mouse_position. Use this tool when the user asks where the mouse cursor is. This tool is read-only and does not move the cursor.
+
 You have access to persistent memory.
+You can observe the currently active Windows application using get_active_window.
+
+When the user asks which application or window is active, use this tool. This tool is read-only. It returns window information but does not
+capture screenshots, click, type, or change anything on the desktop.Never claim to know what is visually displayed on the screen using
+this tool alone.
+
+You can perform a single mouse click using click_mouse.
+Supported buttons are left and right.The click occurs at the current cursor position. Always require explicit user approval.
+Never bypass the approval requirement.
+
+You can move the mouse cursor using move_mouse. This tool requires explicit user approval before moving the cursor.
+Never attempt to bypass the approval requirement. Use get_mouse_position to check the cursor's current location.
 
 You can:
 - Save useful information using save_memory.
@@ -873,7 +1276,12 @@ functions = {
     "run_terminal": lambda args: run_terminal(**args),
     "edit_file": lambda args: edit_file(**args),
     "save_memory": lambda args: save_memory(**args),
-    "search_memory": lambda args: search_memory(**args)
+    "search_memory": lambda args: search_memory(**args),
+    "get_active_window": lambda args: get_active_window(),
+    "capture_screenshot": lambda args: capture_screenshot(),
+    "get_mouse_position": lambda args: get_mouse_position(),
+    "move_mouse": lambda args: move_mouse(args),
+    "click_mouse": lambda agrs: click_mouse(args),
 }
 
 previous_summary = load_conversation_summary()
@@ -952,10 +1360,53 @@ while True:
             except Exception as exc:
                 result = {"error": f"Tool execution failed: {exc}"}
 
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "content": json.dumps(result, ensure_ascii=False),
-            })
+            if (
+                call.function.name == "capture_screenshot"
+                and isinstance(result, dict)
+                and "image_base64" in result
+            ):
+                image_data = result["image_base64"]
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": json.dumps({
+                        "status": "Screenshot captured successfully",
+                        "width": result["width"],
+                        "height": result["height"]
+                    }),
+                })
+                messages.append({
+                    "role":"user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Analyze this screenshot of my desktop."
+                                "Describe what is visible."
+                            )
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": (
+                                    "data:image/png;base64,"
+                                    + image_data
+                                )
+                            }
+                        }
+                    ]
+                })
+            else:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": json.dumps(
+                        result,
+                        ensure_ascii=False
+                    )
+                })
+
+
     else:
         print("Stopped after the tool-call limit.")
